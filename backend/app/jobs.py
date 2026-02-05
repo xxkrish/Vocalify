@@ -1,32 +1,37 @@
-from dataclasses import dataclass
-from typing import Optional, Dict
+from __future__ import annotations
+from pathlib import Path
+from typing import Any, Dict
+import json
 import time
-import threading
 
-@dataclass
-class JobStatus:
-    state: str = "queued"        # queued|running|done|error
-    stage: str = "queued"        # upload|convert|separate|encode|done|error
-    progress: float = 0.0        # 0..100 (best-effort)
-    eta_seconds: Optional[int] = None
-    message: str = ""
-    updated_at: float = 0.0
-    error: Optional[str] = None
+def _job_file(job_dir: Path) -> Path:
+    return job_dir / "job.json"
 
-_jobs: Dict[str, JobStatus] = {}
-_lock = threading.Lock()
+def create_job(job_dir: Path, filename: str) -> None:
+    job_dir.mkdir(parents=True, exist_ok=True)
+    data: Dict[str, Any] = {
+        "status": "queued",     # queued | running | done | failed
+        "progress": 0.0,        # 0..100
+        "etaSeconds": None,
+        "message": "Queued",
+        "filename": filename,
+        "createdAt": int(time.time()),
+        "updatedAt": int(time.time()),
+        "error": None,
+    }
+    _job_file(job_dir).write_text(json.dumps(data), encoding="utf-8")
 
-def create_job(job_id: str) -> None:
-    with _lock:
-        _jobs[job_id] = JobStatus(updated_at=time.time())
+def update_job(job_dir: Path, **updates: Any) -> None:
+    path = _job_file(job_dir)
+    data: Dict[str, Any] = {}
+    if path.exists():
+        data = json.loads(path.read_text(encoding="utf-8"))
+    data.update(updates)
+    data["updatedAt"] = int(time.time())
+    path.write_text(json.dumps(data), encoding="utf-8")
 
-def update_job(job_id: str, **kwargs) -> None:
-    with _lock:
-        j = _jobs[job_id]
-        for k, v in kwargs.items():
-            setattr(j, k, v)
-        j.updated_at = time.time()
-
-def get_job(job_id: str) -> JobStatus:
-    with _lock:
-        return _jobs[job_id]
+def get_job(job_dir: Path) -> Dict[str, Any]:
+    path = _job_file(job_dir)
+    if not path.exists():
+        raise FileNotFoundError("job.json not found")
+    return json.loads(path.read_text(encoding="utf-8"))
