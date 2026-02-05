@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { startSeparationJob, getJobStatus, type JobStatus } from "./api/client";
 
 type Result = {
@@ -15,6 +15,16 @@ export default function App() {
 
   const [job, setJob] = useState<JobStatus | null>(null);
   const pollRef = useRef<number | null>(null);
+
+  // cleanup polling when page changes/unmount
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) {
+        window.clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, []);
 
   const label = useMemo(() => {
     if (!file) return "Drop audio here or click to upload (mp3, wav, m4a, flac)";
@@ -35,15 +45,17 @@ export default function App() {
     return `${m}:${String(r).padStart(2, "0")}`;
   };
 
-  const onSeparate = async () => {
-    if (!file) return;
-
-    // stop previous polling if any
+  const stopPolling = () => {
     if (pollRef.current) {
       window.clearInterval(pollRef.current);
       pollRef.current = null;
     }
+  };
 
+  const onSeparate = async () => {
+    if (!file) return;
+
+    stopPolling();
     setBusy(true);
     setError(null);
     setResult(null);
@@ -52,29 +64,25 @@ export default function App() {
     try {
       const meta = await startSeparationJob(file);
 
-      // Poll status
+      // Start polling job status
       pollRef.current = window.setInterval(async () => {
         try {
           const status = await getJobStatus(meta.statusUrl);
           setJob(status);
 
           if (status.state === "done") {
-            if (pollRef.current) window.clearInterval(pollRef.current);
-            pollRef.current = null;
+            stopPolling();
+            setBusy(false);
 
             setResult({
               jobId: meta.jobId,
               vocalsUrl: meta.vocalsUrl,
               instrumentalUrl: meta.instrumentalUrl,
             });
-
-            setBusy(false);
           }
 
           if (status.state === "error") {
-            if (pollRef.current) window.clearInterval(pollRef.current);
-            pollRef.current = null;
-
+            stopPolling();
             setBusy(false);
             setError(status.error ?? "Separation failed");
           }
@@ -90,13 +98,13 @@ export default function App() {
   };
 
   const onReset = () => {
-    if (pollRef.current) {
-      window.clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
+    stopPolling();
+    setBusy(false);
     setJob(null);
     onPick(null);
   };
+
+  const progress = job ? Math.min(100, Math.max(0, job.progress)) : 0;
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-zinc-950 via-zinc-950 to-zinc-900 text-zinc-100">
@@ -116,7 +124,7 @@ export default function App() {
           </div>
 
           <span className="rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-xs text-zinc-300">
-            Portfolio Demo
+            Krish Patel
           </span>
         </header>
 
@@ -151,7 +159,7 @@ export default function App() {
             </button>
           </div>
 
-          {/* Progress UI */}
+          {/* Progress */}
           {job && job.state !== "done" && (
             <div className="mt-5 rounded-2xl border border-white/10 bg-black/20 p-4">
               <div className="flex items-center justify-between gap-4">
@@ -159,16 +167,14 @@ export default function App() {
                   {job.message || "Processing…"}
                 </div>
                 <div className="text-sm text-zinc-400 whitespace-nowrap">
-                  {Math.round(job.progress)}% • ETA {fmtEta(job.eta_seconds)}
+                  {Math.round(progress)}% • ETA {fmtEta(job.eta_seconds)}
                 </div>
               </div>
 
               <div className="mt-3 h-2 w-full rounded-full bg-white/10 overflow-hidden">
                 <div
                   className="h-full rounded-full bg-white transition-all duration-300"
-                  style={{
-                    width: `${Math.min(100, Math.max(0, job.progress))}%`,
-                  }}
+                  style={{ width: `${progress}%` }}
                 />
               </div>
 

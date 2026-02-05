@@ -1,37 +1,60 @@
 from __future__ import annotations
-from pathlib import Path
-from typing import Any, Dict
-import json
-import time
 
-def _job_file(job_dir: Path) -> Path:
-    return job_dir / "job.json"
+from dataclasses import dataclass, asdict
+from threading import Lock
+from typing import Dict, Optional
 
-def create_job(job_dir: Path, filename: str) -> None:
-    job_dir.mkdir(parents=True, exist_ok=True)
-    data: Dict[str, Any] = {
-        "status": "queued",     # queued | running | done | failed
-        "progress": 0.0,        # 0..100
-        "etaSeconds": None,
-        "message": "Queued",
-        "filename": filename,
-        "createdAt": int(time.time()),
-        "updatedAt": int(time.time()),
-        "error": None,
-    }
-    _job_file(job_dir).write_text(json.dumps(data), encoding="utf-8")
 
-def update_job(job_dir: Path, **updates: Any) -> None:
-    path = _job_file(job_dir)
-    data: Dict[str, Any] = {}
-    if path.exists():
-        data = json.loads(path.read_text(encoding="utf-8"))
-    data.update(updates)
-    data["updatedAt"] = int(time.time())
-    path.write_text(json.dumps(data), encoding="utf-8")
+@dataclass
+class JobStatus:
+    job_id: str
+    state: str  # "queued" | "running" | "done" | "error"
+    stage: str  # "starting" | "downloading" | "separating" | "finalizing" | ...
+    progress: float  # 0..100
+    message: str
+    eta_seconds: Optional[int] = None
+    error: Optional[str] = None
 
-def get_job(job_dir: Path) -> Dict[str, Any]:
-    path = _job_file(job_dir)
-    if not path.exists():
-        raise FileNotFoundError("job.json not found")
-    return json.loads(path.read_text(encoding="utf-8"))
+
+_lock = Lock()
+_jobs: Dict[str, JobStatus] = {}
+
+
+def create_job(job_id: str) -> JobStatus:
+    st = JobStatus(
+        job_id=job_id,
+        state="queued",
+        stage="starting",
+        progress=0.0,
+        message="Queued…",
+        eta_seconds=None,
+        error=None,
+    )
+    with _lock:
+        _jobs[job_id] = st
+    return st
+
+
+def update_job(job_id: str, **kwargs) -> JobStatus:
+    with _lock:
+        if job_id not in _jobs:
+            # allow late creation if needed
+            _jobs[job_id] = JobStatus(
+                job_id=job_id,
+                state="queued",
+                stage="starting",
+                progress=0.0,
+                message="Queued…",
+            )
+        st = _jobs[job_id]
+        for k, v in kwargs.items():
+            if hasattr(st, k):
+                setattr(st, k, v)
+        _jobs[job_id] = st
+        return st
+
+
+def get_job(job_id: str) -> Optional[dict]:
+    with _lock:
+        st = _jobs.get(job_id)
+        return asdict(st) if st else None

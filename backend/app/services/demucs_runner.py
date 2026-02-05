@@ -1,115 +1,126 @@
+import re
 import shutil
 import subprocess
 import sys
-import time
-import re
 from pathlib import Path
 from typing import Callable, Optional
 
-PROGRESS_RE = re.compile(r"(\d+)%")
+# Matches lines like: " 45%|####...| 36.1M/80.2M [00:02<00:02, 20.0MB/s]"
+RE_PERCENT = re.compile(r"(\d{1,3})%\|")
+RE_ETA = re.compile(r"<(\d{2}):(\d{2})")  # <MM:SS
+RE_STAGE_HINT = re.compile(r"(Downloading|Separating|Applying|Loading)", re.IGNORECASE)
 
-def run_demucs(
+
+def _parse_eta_seconds(line: str) -> Optional[int]:
+    m = RE_ETA.search(line)
+    if not m:
+        return None
+    mm = int(m.group(1))
+    ss = int(m.group(2))
+    return mm * 60 + ss
+
+
+def run_demucs_with_progress(
+    *,
     input_path: Path,
     job_dir: Path,
+    on_progress: Callable[[float, str, Optional[int], str], None],
     model: str = "htdemucs_ft",
     bitrate: str = "320",
-    on_progress: Optional[Callable[[float, int | None, str], None]] = None,
 ) -> None:
     """
-    Runs demucs and reports stable overall progress.
-    on_progress(progress_pct, eta_seconds, message)
+    Calls on_progress(progress, stage, eta_seconds, message)
     """
-
     out_dir = job_dir / "out"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     cmd = [
-        sys.executable, "-m", "demucs",
-        "-n", model,
+        sys.executable,
+        "-m",
+        "demucs",
+        "-n",
+        model,
         "--two-stems=vocals",
         "--mp3",
-        "--mp3-bitrate", bitrate,
-        "-o", str(out_dir),
+        "--mp3-bitrate",
+        bitrate,
+        "-o",
+        str(out_dir),
         str(input_path),
     ]
 
-    start_time = time.time()
+    # Start at 1% so UI doesn't look stuck instantly
+    on_progress(1.0, "starting", None, "Starting Demucs…")
 
-    process = subprocess.Popen(
+    # We stream stderr because tqdm usually writes there
+    p = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
         universal_newlines=True,
     )
 
-    # We only start counting progress after separation begins
-    started = False
+    last_pct = 1.0
+    last_stage = "starting"
 
-    # Demucs "bag of 4 models" -> multiple progress bars.
-    # We'll treat each 0..100 bar as one "phase" and map to overall 0..100.
-    phases_total = 4  # good default for htdemucs_ft
-    phase_index = 0
-    last_pct_in_phase = 0.0
-    overall_last = 0.0
+    def handle_line(line: str):
+        nonlocal last_pct, last_stage
+        line = line.strip()
+        if not line:
+            return
 
-    def emit(overall_pct: float, msg: str):
-        nonlocal overall_last
-        overall_pct = max(0.0, min(99.0, overall_pct))  # keep 100 for final "done"
-        if overall_pct < overall_last:
-            return  # keep monotonic overall
-        overall_last = overall_pct
+        # stage hints
+        if "Selected model is a bag of" in line:
+            last_stage = "starting"
+            on_progress(max(last_pct, 2.0), last_stage, None, "Loading model…")
+            return
 
-        elapsed = time.time() - start_time
-        eta = int(elapsed * (100 - overall_pct) / overall_pct) if overall_pct > 1 else None
+        if "Downloading" in line or "Downloading:" in line:
+            last_stage = "downloading"
+            on_progress(max(last_pct, 3.0), last_stage, _parse_eta_seconds(line), "Downloading model files…")
+            return
 
-        if on_progress:
-            on_progress(overall_pct, eta, msg)
+        if "Separating track" in line:
+            last_stage = "separating"
+            on_progress(max(last_pct, 5.0), last_stage, None, "Separating stems…")
+            return
 
-    if on_progress:
-        on_progress(0.0, None, "Preparing…")
+        # tqdm percentage
+        pm = RE_PERCENT.search(line)
+        if pm:
+            pct = float(pm.group(1))
+            eta = _parse_eta_seconds(line)
+            # keep it monotonic
+            if pct < last_pct:
+                pct = last_pct
+            last_pct = pct
+            stage = last_stage if last_stage != "starting" else "separating"
+            on_progress(pct, stage, eta, "Processing…")
+            return
 
-    for raw in process.stdout:
-        line = (raw or "").strip()
+        # fallback stage detection
+        hm = RE_STAGE_HINT.search(line)
+        if hm:
+            last_stage = hm.group(1).lower()
+            on_progress(last_pct, last_stage, _parse_eta_seconds(line), line[:80])
+            return
 
-        # Mark "started" when demucs begins actual separation
-        if not started:
-            if "Separating track" in line:
-                started = True
-                if on_progress:
-                    on_progress(1.0, None, "Separating audio…")
-            else:
-                continue  # ignore model download bars etc.
+    # Read stderr live
+    assert p.stderr is not None
+    for line in p.stderr:
+        handle_line(line)
 
-        # Parse progress percentage from demucs bar lines
-        m = PROGRESS_RE.search(line)
-        if not m:
-            continue
+    rc = p.wait()
+    if rc != 0:
+        out = ""
+        if p.stdout:
+            out += p.stdout.read() if hasattr(p.stdout, "read") else ""
+        raise RuntimeError(out or f"demucs failed with code {rc}")
 
-        pct = float(m.group(1))
-        pct = max(0.0, min(100.0, pct))
-
-        # Detect phase transitions: if it drops a lot after being high, new bar started
-        if last_pct_in_phase >= 90.0 and pct <= 10.0:
-            phase_index = min(phases_total - 1, phase_index + 1)
-            last_pct_in_phase = 0.0
-
-        # Monotonic within the phase
-        if pct < last_pct_in_phase:
-            continue
-        last_pct_in_phase = pct
-
-        # Map to overall:
-        # phase_index 0..3, pct 0..100 -> overall 0..100
-        overall = ((phase_index + (pct / 100.0)) / phases_total) * 100.0
-
-        emit(overall, "Separating audio…")
-
-    process.wait()
-
-    if process.returncode != 0:
-        raise RuntimeError("Demucs failed (see server logs)")
+    # finalize outputs
+    on_progress(95.0, "finalizing", None, "Finalizing output files…")
 
     vocals = list(out_dir.glob("**/vocals.mp3"))
     inst = list(out_dir.glob("**/no_vocals.mp3"))
@@ -122,5 +133,4 @@ def run_demucs(
     shutil.copy(vocals_path, job_dir / "vocals_320.mp3")
     shutil.copy(inst_path, job_dir / "instrumental_320.mp3")
 
-    if on_progress:
-        on_progress(100.0, 0, "Done ✅")
+    on_progress(100.0, "done", 0, "Done ✅")
