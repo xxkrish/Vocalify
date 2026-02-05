@@ -10,7 +10,7 @@ dist/
 # Env
 .env
 
-# Runtime files
+# Runtime
 backend/app/storage/
 backend/tmp/
 
