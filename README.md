@@ -90,33 +90,30 @@ Vocalify/
         react.svg
 ```
 
-## Clean Architecture Overview
+## Architecture Diagram
 
-Vocalify is split into a frontend client, an API layer, a job-state layer, and an audio-processing service.
+```mermaid
+flowchart TD
+    A["Browser UI<br/>React + TypeScript + Vite"] -->|"Upload audio file<br/>POST /api/jobs"| B["FastAPI API Layer"]
 
-```text
-Browser UI
-  |
-  | upload audio file
-  v
-FastAPI API layer
-  |
-  | create job, save upload, start worker
-  v
-Background worker thread
-  |
-  | run Demucs subprocess
-  v
-Demucs audio separation
-  |
-  | write vocals and instrumental outputs
-  v
-Storage folder
-  |
-  | serve MP3 files through download endpoints
-  v
-Browser UI
+    B -->|"Create job ID"| C["In-Memory Job Store"]
+    B -->|"Save uploaded file"| D["Temporary Upload Folder<br/>backend/tmp/"]
+    B -->|"Start processing"| E["Background Worker Thread"]
+
+    E -->|"Run subprocess"| F["Demucs Audio Separation<br/>python -m demucs"]
+    F -->|"Generate stems"| G["Demucs Output Folder"]
+
+    G -->|"Copy final files"| H["Storage Folder<br/>backend/app/storage/{job_id}/"]
+
+    H --> I["vocals_320.mp3"]
+    H --> J["instrumental_320.mp3"]
+
+    A -->|"Poll progress<br/>GET /api/jobs/{job_id}"| C
+    A -->|"Download/preview output<br/>GET /api/download/{job_id}/{stem}"| H
+
+    H -->|"Serve MP3 files"| A
 ```
+
 
 ### Frontend Responsibilities
 
