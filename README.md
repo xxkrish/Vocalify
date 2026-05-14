@@ -114,6 +114,43 @@ flowchart TD
     H -->|"Serve MP3 files"| A
 ```
 
+## Processing Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Frontend as Browser UI
+    participant API as FastAPI Backend
+    participant Jobs as Job Store
+    participant Worker as Background Worker
+    participant Demucs
+    participant Storage
+
+    User->>Frontend: Select audio file
+    Frontend->>API: POST /api/jobs
+    API->>Storage: Save uploaded audio temporarily
+    API->>Jobs: Create queued job
+    API->>Worker: Start worker thread
+    API-->>Frontend: Return jobId and output URLs
+
+    loop Poll status
+        Frontend->>API: GET /api/jobs/{job_id}
+        API->>Jobs: Read job status
+        API-->>Frontend: Return progress and stage
+    end
+
+    Worker->>Jobs: Mark job running
+    Worker->>Demucs: Run vocal separation
+    Demucs-->>Worker: Output vocals + no_vocals
+    Worker->>Storage: Save vocals_320.mp3
+    Worker->>Storage: Save instrumental_320.mp3
+    Worker->>Jobs: Mark job done
+
+    Frontend->>API: GET /api/download/{job_id}/instrumental
+    API->>Storage: Read MP3 file
+    API-->>Frontend: Serve instrumental MP3
+```
+
 
 ### Frontend Responsibilities
 
